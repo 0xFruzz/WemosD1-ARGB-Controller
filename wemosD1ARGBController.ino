@@ -3,150 +3,99 @@
 #include <ESP8266WebServer.h>
 #include <EEPROM.h>
 
-// led conf
+// Constants
 #define LED_PIN     D4    
-#define NUM_LEDS    60   
+#define NUM_LEDS    250   
 #define LED_TYPE    WS2812B
 #define COLOR_ORDER GRB   
-#define BRIGHTNESS 255
 
 CRGB leds[NUM_LEDS];
 
-// wifi and web
+// Wifi Data
 const char* ssid = "";
 const char* password = "";
 
 ESP8266WebServer server(80);
-
-//EEPROM Configuration
 
 struct Config {
   uint8_t brightness;
   uint8_t r;
   uint8_t g;
   uint8_t b;
+  uint8_t magic;
 };
 
 Config config;
 
 void setup() {
   Serial.begin(115200);
-  WiFi.begin(ssid, password);
-  EEPROM.begin(sizeof(Config) + 10);
+  
+  EEPROM.begin(sizeof(Config));
   EEPROM.get(0, config);
 
-  Serial.println("Connecting to WiFi...");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.println(".");
+  if (config.magic != 0xAA) {
+    config = {128, 255, 255, 255, 0xAA};
   }
-  Serial.print("IP ");
-  Serial.println(WiFi.localIP());
 
-  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS)
-         .setCorrection(TypicalLEDStrip);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nIP: " + WiFi.localIP().toString());
+
+  FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection(TypicalLEDStrip);
   FastLED.setBrightness(config.brightness);
+  fill_solid(leds, NUM_LEDS, CRGB(config.r, config.g, config.b));
+  FastLED.show();
   
-  server.on("/stats", handleRoot);
-  server.on("/setup", handleSetup);
+  server.on("/stats", HTTP_GET, handleRoot);
+  server.on("/setup", HTTP_GET, handleSetup);
   server.begin();
 }
 
 void loop() {
   server.handleClient();
-  colorist();
-  delay(20);
 }
 
-void colorist() {
-  CRGB cur = leds[0];
-  if(config.r != cur.r && config.g != cur.g && config.b != cur.b) {
-      fillSolid(CRGB(config.r, config.g, config.b));
+void applyAndSave() {
+  bool changed = false;
+
+  if (FastLED.getBrightness() != config.brightness) changed = true;
+  if (leds[0].r != config.r || leds[0].g != config.g || leds[0].b != config.b) changed = true;
+
+  if (changed) {
+    FastLED.setBrightness(config.brightness);
+    fill_solid(leds, NUM_LEDS, CRGB(config.r, config.g, config.b));
+    FastLED.show();
+    
+    EEPROM.put(0, config);
+    EEPROM.commit();
   }
-}
-
-void saveConfig() {
-  EEPROM.put(0, config);
-  EEPROM.commit();
-}
-
-void updateConfig() {
-  config.brightness = FastLED.getBrightness();
-  
-  CRGB cur = leds[0];
-  config.r = cur.r;
-  config.g = cur.g;
-  config.b = cur.b;
-
-  saveConfig();
-}
-
-void fillSolid(CRGB color) {
-  fill_solid(leds, NUM_LEDS, color);
-  FastLED.show();
 }
 
 void handleRoot() {
-  String json = "{";
-  
-  json += "\"leds\":{";
-  json += "\"count\":" + String(NUM_LEDS) + ",";
-  json += "\"brightness\":" + String(FastLED.getBrightness()) + ",";
-  json += "\"color\":{";
-  json += "\"r\":" + String(config.r) + ",";
-  json += "\"g\":" + String(config.g) + ",";
-  json += "\"b\":" + String(config.b) + ",";
-  json += "},";
-  
-  json += "\"config\":{";
-  json += "\"brightness\":" + String(config.brightness) + ",";
-  json += "\"color\":{";
-  json += "\"r\":" + String(config.r) + ",";
-  json += "\"g\":" + String(config.g) + ",";
-  json += "\"b\":" + String(config.b);
-  json += "}";
-  json += "}";
-  
-  server.send(200, "application/json", json);
+  char buf[256];
+  snprintf(buf, sizeof(buf), 
+    "{\"leds\":{\"count\":%d,\"brightness\":%d,\"color\":{\"r\":%d,\"g\":%d,\"b\":%d}}}",
+    NUM_LEDS, config.brightness, config.r, config.g, config.b);
+  server.send(200, "application/json", buf);
 }
 
 void handleSetup() {
-  String json = "{";
-  
   if (server.hasArg("brightness")) {
-    int brightness = server.arg("brightness").toInt();
-    brightness = constrain(brightness, 0, 255);
-    FastLED.setBrightness(brightness);
-    FastLED.show();
-    
-    json += "\"brightness\":" + String(brightness) + ",";
+    config.brightness = constrain(server.arg("brightness").toInt(), 0, 255);
   }
   
   if (server.hasArg("r") && server.hasArg("g") && server.hasArg("b")) {
-    int r = server.arg("r").toInt();
-    int g = server.arg("g").toInt();
-    int b = server.arg("b").toInt();
-    
-    r = constrain(r, 0, 255);
-    g = constrain(g, 0, 255);
-    b = constrain(b, 0, 255);
-    
-    fillSolid(CRGB(r, g, b));
-    
-    json += "\"color\":{";
-    json += "\"r\":" + String(r) + ",";
-    json += "\"g\":" + String(g) + ",";
-    json += "\"b\":" + String(b);
-    json += "},";
+    config.r = constrain(server.arg("r").toInt(), 0, 255);
+    config.g = constrain(server.arg("g").toInt(), 0, 255);
+    config.b = constrain(server.arg("b").toInt(), 0, 255);
   }
 
-  updateConfig();
-  
-  if (json.endsWith(",")) 
-    json.remove(json.length() - 1);
-  
-  json += "}";
-  
-  FastLED.show();
-  server.send(200, "application/json", json);
+  applyAndSave();
+
+  char buf[128];
+  snprintf(buf, sizeof(buf), "{\"status\":\"ok\",\"brightness\":%d}", config.brightness);
+  server.send(200, "application/json", buf);
 }
